@@ -1,0 +1,27 @@
+{
+  "name": "civictrack-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "clean": "node scripts/clean-next-cache.js",
+    "predev": "npm run clean",
+    "dev": "next dev --turbopack",
+    "prebuild": "npm run clean",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "axios": "^1.15.0",
+    "leaflet": "^1.9.4",
+    "next": "^16.2.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-leaflet": "^4.2.1",
+    "socket.io-client": "^4.8.3"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.45",
+    "tailwindcss": "^3.4.10"
+  }
+}

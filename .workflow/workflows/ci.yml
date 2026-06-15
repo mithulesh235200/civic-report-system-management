@@ -1,0 +1,57 @@
+name: CivicTrack CI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        run: npm ci
+
+      - name: Run backend tests
+        run: npm test
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Create build env file
+        run: |
+          echo "NEXT_PUBLIC_API_URL=http://localhost:5000/api" > .env.local
+          echo "NEXT_PUBLIC_SOCKET_URL=http://localhost:5000" >> .env.local
+          echo "NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=dummy-key" >> .env.local
+
+      - name: Build frontend
+        run: npm run build
