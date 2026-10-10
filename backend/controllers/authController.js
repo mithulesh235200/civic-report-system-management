@@ -22,7 +22,7 @@ const sendAuthResponse = async (res, user, statusCode) => {
   const accessToken = generateAccessToken(tokenPayload);
   const refreshToken = generateRefreshToken(tokenPayload);
 
-  await User.updateOne({ _id: user._id }, { $set: { refreshTokenHash: hashToken(refreshToken) } });
+  await User.setRefreshHash(user._id || user.id, hashToken(refreshToken));
   setAuthCookies(res, accessToken, refreshToken);
 
   return res.status(statusCode).json({
@@ -51,7 +51,7 @@ const register = asyncHandler(async (req, res) => {
     });
   }
 
-  const existingUser = await User.findOne({ email: email.toLowerCase() });
+  const existingUser = await User.findByEmail(email.toLowerCase());
   if (existingUser) {
     return res.status(StatusCodes.CONFLICT).json({
       success: false,
@@ -80,7 +80,7 @@ const login = asyncHandler(async (req, res) => {
 
   const { email, password, portal } = req.body;
 
-  const user = await User.findOne({ email: email.toLowerCase() }).select("+password +passwordHash +refreshTokenHash");
+  const user = await User.findByEmail(email.toLowerCase());
   if (!user) {
     return res.status(StatusCodes.UNAUTHORIZED).json({
       success: false,
@@ -132,27 +132,24 @@ const getMe = asyncHandler(async (req, res) => {
 const updateProfile = asyncHandler(async (req, res) => {
   const { name, phone, avatar, address, bio, preferredLanguage, notificationPreferences } = req.body;
 
-  req.user.name = name ?? req.user.name;
-  req.user.phone = phone ?? req.user.phone;
-  req.user.avatar = avatar ?? req.user.avatar;
-  req.user.address = address ?? req.user.address;
-  req.user.bio = bio ?? req.user.bio;
-  req.user.preferredLanguage = preferredLanguage || req.user.preferredLanguage;
+  const mergedPreferences = notificationPreferences
+    ? { ...(req.user.notificationPreferences || {}), ...notificationPreferences }
+    : undefined;
 
-  if (notificationPreferences) {
-    req.user.notificationPreferences = {
-      ...req.user.notificationPreferences?.toObject?.(),
-      ...req.user.notificationPreferences,
-      ...notificationPreferences,
-    };
-  }
-
-  await req.user.save();
+  const updated = await User.updateById(req.user._id || req.user.id, {
+    name: name ?? req.user.name,
+    phone: phone ?? req.user.phone,
+    avatar: avatar ?? req.user.avatar,
+    address: address ?? req.user.address,
+    bio: bio ?? req.user.bio,
+    preferredLanguage: preferredLanguage || req.user.preferredLanguage,
+    ...(mergedPreferences ? { notificationPreferences: mergedPreferences } : {}),
+  });
 
   return res.status(StatusCodes.OK).json({
     success: true,
     message: "Profile updated successfully",
-    user: req.user.toSafeObject(),
+    user: updated.toSafeObject(),
   });
 });
 
@@ -168,7 +165,7 @@ const refreshSession = asyncHandler(async (req, res) => {
 
   try {
     const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET);
-    const user = await User.findById(decoded.userId).select("+refreshTokenHash");
+    const user = await User.findById(decoded.userId);
 
     if (!user || user.refreshTokenHash !== hashToken(refreshToken)) {
       clearAuthCookies(res);
@@ -190,11 +187,11 @@ const refreshSession = asyncHandler(async (req, res) => {
 
 const logout = asyncHandler(async (req, res) => {
   if (req.user) {
-    await User.updateOne({ _id: req.user._id }, { $set: { refreshTokenHash: null } });
+    await User.setRefreshHash(req.user._id || req.user.id, null);
   } else if (req.cookies.refreshToken) {
     try {
       const decoded = jwt.verify(req.cookies.refreshToken, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET);
-      await User.updateOne({ _id: decoded.userId }, { $set: { refreshTokenHash: null } });
+      await User.setRefreshHash(decoded.userId, null);
     } catch (error) {
       // Ignore invalid refresh tokens during logout.
     }

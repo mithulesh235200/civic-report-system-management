@@ -13,29 +13,16 @@ const { createNotificationForUsers } = require("../services/notificationService"
 const { emitToUsers } = require("../services/socketService");
 const { ISSUE_STATUS, ROLES } = require("../utils/constants");
 
-const buildWorkerLoadMap = async () => {
-  const assignments = await Assignment.aggregate([
-    {
-      $match: {
-        status: { $in: ["assigned", "accepted"] },
-      },
-    },
-    {
-      $group: {
-        _id: "$workerId",
-        activeAssignments: { $sum: 1 },
-      },
-    },
-  ]);
+const userIdOf = (value) => String(value?._id || value?.id || value);
 
-  return new Map(assignments.map((item) => [String(item._id), item.activeAssignments]));
-};
+const buildWorkerLoadMap = async () => Assignment.activeLoadMap();
 
 const enrichWorkers = async (workers) => {
   const loadMap = await buildWorkerLoadMap();
 
   return workers.map((worker) => ({
-    id: worker._id,
+    id: worker.id || worker._id,
+    _id: worker.id || worker._id,
     name: worker.name,
     email: worker.email,
     role: worker.role === "citizen" ? "user" : worker.role,
@@ -48,7 +35,7 @@ const enrichWorkers = async (workers) => {
     workerProfile: worker.role === "worker" ? worker.workerProfile : undefined,
     createdAt: worker.createdAt,
     updatedAt: worker.updatedAt,
-    activeAssignments: loadMap.get(String(worker._id)) || 0,
+    activeAssignments: loadMap.get(String(worker.id || worker._id)) || 0,
   }));
 };
 
@@ -85,7 +72,7 @@ const buildIssueCsv = (issues) => {
   ];
 
   const rows = issues.map((issue) => [
-    issue._id,
+    issue._id || issue.id,
     issue.title,
     issue.category,
     issue.severity,
@@ -109,32 +96,6 @@ const buildIssueCsv = (issues) => {
   return [headers, ...rows].map((row) => row.map(csvEscape).join(",")).join("\n");
 };
 
-const buildIssueQuery = ({ search, status, severity, category }) => {
-  const query = {};
-
-  if (status && status !== "all") {
-    query.status = status;
-  }
-
-  if (severity && severity !== "all") {
-    query.severity = severity;
-  }
-
-  if (category && category !== "all") {
-    query.category = category;
-  }
-
-  if (search) {
-    query.$or = [
-      { title: { $regex: search, $options: "i" } },
-      { description: { $regex: search, $options: "i" } },
-      { address: { $regex: search, $options: "i" } },
-    ];
-  }
-
-  return query;
-};
-
 const buildAdminIssueCacheKey = (query = {}) =>
   `admin:issues:${query.search || ""}:${query.status || "all"}:${query.severity || "all"}:${query.category || "all"}`;
 
@@ -151,11 +112,7 @@ const buildRecentDays = (days) => {
 
 const getAllIssues = asyncHandler(async (req, res) => {
   const issues = await getOrSet(buildAdminIssueCacheKey(req.query), 20000, async () =>
-    Issue.find(buildIssueQuery(req.query))
-      .populate("reportedBy", "name email")
-      .populate("assignedWorker", "name email")
-      .sort({ createdAt: -1 })
-      .lean()
+    Issue.listAdmin(req.query)
   );
 
   res.status(StatusCodes.OK).json({
@@ -166,18 +123,14 @@ const getAllIssues = asyncHandler(async (req, res) => {
 
 const exportIssuesCsv = asyncHandler(async (req, res) => {
   const issues = await getOrSet(`${buildAdminIssueCacheKey(req.query)}:csv-source`, 20000, async () =>
-    Issue.find(buildIssueQuery(req.query))
-      .populate("reportedBy", "name email")
-      .populate("assignedWorker", "name email")
-      .sort({ createdAt: -1 })
-      .lean()
+    Issue.listAdmin(req.query)
   );
 
   const csv = buildIssueCsv(issues);
   const stamp = new Date().toISOString().slice(0, 10);
 
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
-  res.setHeader("Content-Disposition", `attachment; filename=\"civictrack-issues-${stamp}.csv\"`);
+  res.setHeader("Content-Disposition", `attachment; filename="civictrack-issues-${stamp}.csv"`);
   res.status(StatusCodes.OK).send(csv);
 });
 
@@ -192,42 +145,41 @@ const assignIssue = asyncHandler(async (req, res) => {
 
   const { issueId, workerId, notes } = req.body;
 
-  const [issue, worker] = await Promise.all([
-    Issue.findById(issueId),
-    User.findOne({ _id: workerId, role: ROLES.WORKER }),
-  ]);
+  const [issue, worker] = await Promise.all([Issue.findById(issueId), User.findById(workerId)]);
 
-  if (!issue || !worker) {
+  if (!issue || !worker || worker.role !== ROLES.WORKER) {
     return res.status(StatusCodes.NOT_FOUND).json({
       success: false,
       message: "Issue or worker not found",
     });
   }
 
-  issue.assignedWorker = worker._id;
-  issue.status = ISSUE_STATUS.ASSIGNED;
-  issue.verifiedBy = req.user._id;
-  await issue.save();
+  const reporterId = userIdOf(issue.reportedBy);
+  await Issue.updateById(issue._id || issue.id, {
+    assignedWorker: userIdOf(worker),
+    status: ISSUE_STATUS.ASSIGNED,
+    verifiedBy: userIdOf(req.user),
+  });
   invalidatePrefix("admin:");
 
   const assignment = await Assignment.create({
-    issueId: issue._id,
-    workerId: worker._id,
-    assignedBy: req.user._id,
+    issueId: issue._id || issue.id,
+    workerId: userIdOf(worker),
+    assignedBy: userIdOf(req.user),
     notes,
     status: "assigned",
   });
 
   await createNotificationForUsers({
-    userIds: [worker._id, issue.reportedBy],
+    userIds: [userIdOf(worker), reporterId],
     message: `Issue "${issue.title}" has been assigned to ${worker.name}`,
     type: "assignment",
   });
 
-  emitToUsers(req.app, [worker._id, issue.reportedBy], "issue:assigned", {
-    issueId: issue._id,
+  emitToUsers(req.app, [userIdOf(worker), reporterId], "issue:assigned", {
+    issueId: issue._id || issue.id,
     worker: {
-      id: worker._id,
+      id: userIdOf(worker),
       name: worker.name,
       email: worker.email,
     },
@@ -259,106 +211,47 @@ const updateIssueStatus = asyncHandler(async (req, res) => {
     });
   }
 
-  issue.status = status;
-  issue.verifiedBy = req.user._id;
-  await issue.save();
+  const updated = await Issue.updateById(issue._id || issue.id, {
+    status,
+    verifiedBy: userIdOf(req.user),
+  });
   invalidatePrefix("admin:");
 
+  const notifyIds = [userIdOf(updated.reportedBy)];
+  if (updated.assignedWorker) {
+    notifyIds.push(userIdOf(updated.assignedWorker));
+  }
+
   await createNotificationForUsers({
-    userIds: [issue.reportedBy, issue.assignedWorker].filter(Boolean),
-    message: `Issue "${issue.title}" status updated to ${status}`,
+    userIds: notifyIds,
+    message: `Issue "${updated.title}" status updated to ${status}`,
     type: "issue-status",
   });
 
-  emitToUsers(req.app, [issue.reportedBy, issue.assignedWorker].filter(Boolean), "issue:status-updated", {
-    issueId: issue._id,
+  emitToUsers(req.app, notifyIds, "issue:status-updated", {
+    issueId: updated._id || updated.id,
     status,
   });
 
   res.status(StatusCodes.OK).json({
     success: true,
     message: "Issue status updated successfully",
-    issue,
+    issue: updated,
   });
 });
 
 const getDashboardStats = asyncHandler(async (req, res) => {
   const stats = await getOrSet("admin:dashboard", 30000, async () => {
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setHours(0, 0, 0, 0);
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
-
-    const [
-      totalIssues,
-      pendingIssues,
-      resolvedIssues,
-      categoryBreakdown,
-      severityBreakdown,
-      workers,
-      dailyTrendRaw,
-      hotspotRaw,
-      topSupportedIssues,
-    ] = await Promise.all([
-      Issue.countDocuments({}),
-      Issue.countDocuments({ status: { $in: [ISSUE_STATUS.REPORTED, ISSUE_STATUS.VERIFIED, ISSUE_STATUS.ASSIGNED] } }),
-      Issue.countDocuments({ status: ISSUE_STATUS.RESOLVED }),
-      Issue.aggregate([{ $group: { _id: "$category", count: { $sum: 1 } } }]),
-      Issue.aggregate([{ $group: { _id: "$severity", count: { $sum: 1 } } }]),
-      User.find({ role: ROLES.WORKER }).sort({ name: 1 }).lean(),
-      Issue.aggregate([
-        { $match: { createdAt: { $gte: sevenDaysAgo } } },
-        {
-          $group: {
-            _id: {
-              year: { $year: "$createdAt" },
-              month: { $month: "$createdAt" },
-              day: { $dayOfMonth: "$createdAt" },
-            },
-            count: { $sum: 1 },
-          },
-        },
-        { $sort: { "_id.year": 1, "_id.month": 1, "_id.day": 1 } },
-      ]),
-      Issue.aggregate([
-        {
-          $group: {
-            _id: "$address",
-            count: { $sum: 1 },
-            categories: { $addToSet: "$category" },
-          },
-        },
-        { $match: { _id: { $nin: [null, ""] } } },
-        { $sort: { count: -1 } },
-        { $limit: 5 },
-      ]),
-      Issue.aggregate([
-        {
-          $project: {
-            title: 1,
-            address: 1,
-            status: 1,
-            supportersCount: { $size: { $ifNull: ["$supporters", []] } },
-          },
-        },
-        { $sort: { supportersCount: -1, createdAt: -1 } },
-        { $limit: 5 },
-      ]),
-    ]);
-
-    const trendMap = new Map(
-      dailyTrendRaw.map((item) => [
-        `${item._id.year}-${item._id.month}-${item._id.day}`,
-        item.count,
-      ])
-    );
+    const aggregates = await Issue.dashboardStats();
+    const workers = await User.listWorkers();
 
     const dailyTrend = buildRecentDays(7).map((date) => ({
       label: date.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
-      count: trendMap.get(`${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`) || 0,
+      count: aggregates.trend[`${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`] || 0,
     }));
 
     const enrichedWorkers = await enrichWorkers(workers);
-    const hotspots = hotspotRaw.map((item) => ({
+    const hotspots = aggregates.hotspots.map((item) => ({
       address: item._id,
       count: item.count,
       categories: item.categories,
@@ -373,15 +266,15 @@ const getDashboardStats = asyncHandler(async (req, res) => {
       .slice(0, 5);
 
     return {
-      totalIssues,
-      pendingIssues,
-      resolvedIssues,
-      categoryBreakdown,
-      severityBreakdown,
+      totalIssues: aggregates.totalIssues,
+      pendingIssues: aggregates.pendingIssues,
+      resolvedIssues: aggregates.resolvedIssues,
+      categoryBreakdown: aggregates.categoryBreakdown,
+      severityBreakdown: aggregates.severityBreakdown,
       dailyTrend,
       hotspots,
       hotspotForecasts,
-      topSupportedIssues,
+      topSupportedIssues: aggregates.topSupportedIssues,
       workers: enrichedWorkers,
     };
   });
@@ -394,7 +287,7 @@ const getDashboardStats = asyncHandler(async (req, res) => {
 
 const getWorkers = asyncHandler(async (req, res) => {
   const enrichedWorkers = await getOrSet("admin:workers", 30000, async () => {
-    const workers = await User.find({ role: ROLES.WORKER }).sort({ name: 1 }).lean();
+    const workers = await User.listWorkers();
     return enrichWorkers(workers);
   });
 
@@ -406,51 +299,34 @@ const getWorkers = asyncHandler(async (req, res) => {
 
 const getAiTrainingCenter = asyncHandler(async (req, res) => {
   const training = await getOrSet("admin:ai-training", 20000, async () => {
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-
-    const [feedbackCount, recentFeedbackCount, feedbackItems, lowConfidenceIssues] = await Promise.all([
-      AITrainingFeedback.countDocuments({}),
-      AITrainingFeedback.countDocuments({ appliedAt: { $gte: sevenDaysAgo } }),
-      AITrainingFeedback.find({})
-        .populate("issueId", "title category severity status address")
-        .populate("correctedBy", "name email")
-        .sort({ appliedAt: -1 })
-        .limit(8)
-        .lean(),
-      Issue.find({
-        $or: [
-          { "aiAnalysis.confidenceScore": { $lt: 0.78 } },
-          { "aiAnalysis.semisupervisedConfidence": { $lt: 0.72 } },
-          { "aiAnalysis.retrievalConfidence": { $lt: 0.4 } },
-        ],
-        status: { $ne: ISSUE_STATUS.REJECTED },
-      })
-        .select("title category severity status address aiAnalysis createdAt")
-        .sort({ createdAt: -1 })
-        .limit(10)
-        .lean(),
+    const [feedbackCounts, feedbackItems, lowConfidenceIssues] = await Promise.all([
+      AITrainingFeedback.counts(),
+      AITrainingFeedback.recentList(8),
+      Issue.lowConfidenceReview(10),
     ]);
 
-    const reviewQueue = lowConfidenceIssues.map((issue) => ({
-      id: issue._id,
-      title: issue.title,
-      currentCategory: issue.category,
-      currentSeverity: issue.severity,
-      status: issue.status,
-      address: issue.address,
-      predictedCategory: issue.aiAnalysis?.predictedCategory || issue.category,
-      predictedSeverity: issue.aiAnalysis?.predictedSeverity || issue.severity,
-      confidenceScore: issue.aiAnalysis?.confidenceScore || 0,
-      semisupervisedConfidence: issue.aiAnalysis?.semisupervisedConfidence || 0,
-      retrievalConfidence: issue.aiAnalysis?.retrievalConfidence || 0,
-      historicalPatternSummary: issue.aiAnalysis?.historicalPatternSummary || "",
-    }));
+    const reviewQueue = lowConfidenceIssues.map((issue) => {
+      const ai = issue.ai_analysis || issue.aiAnalysis || {};
+      return {
+        id: issue.id || issue._id,
+        title: issue.title,
+        currentCategory: issue.category,
+        currentSeverity: issue.severity,
+        status: issue.status,
+        address: issue.address,
+        predictedCategory: ai.predictedCategory || issue.category,
+        predictedSeverity: ai.predictedSeverity || issue.severity,
+        confidenceScore: ai.confidenceScore || 0,
+        semisupervisedConfidence: ai.semisupervisedConfidence || 0,
+        retrievalConfidence: ai.retrievalConfidence || 0,
+        historicalPatternSummary: ai.historicalPatternSummary || "",
+      };
+    });
 
     return {
       stats: {
-        totalFeedback: feedbackCount,
-        recentFeedback: recentFeedbackCount,
+        totalFeedback: feedbackCounts.total,
+        recentFeedback: feedbackCounts.recent,
         reviewQueueCount: reviewQueue.length,
       },
       reviewQueue,
@@ -483,44 +359,30 @@ const submitAiTrainingFeedback = asyncHandler(async (req, res) => {
     });
   }
 
-  const feedback = await AITrainingFeedback.findOneAndUpdate(
-    { issueId: issue._id },
-    {
-      $set: {
-        issueId: issue._id,
-        predictedCategory: issue.aiAnalysis?.predictedCategory || issue.category,
-        predictedSeverity: issue.aiAnalysis?.predictedSeverity || issue.severity,
-        correctedCategory,
-        correctedSeverity,
-        trainingNotes: trainingNotes || "",
-        confidenceOverride:
-          confidenceOverride === undefined || confidenceOverride === null || confidenceOverride === ""
-            ? null
-            : Number(confidenceOverride),
-        correctedBy: req.user._id,
-        status: "approved",
-        appliedAt: new Date(),
-      },
-    },
-    {
-      new: true,
-      upsert: true,
-      runValidators: true,
-      setDefaultsOnInsert: true,
-    }
-  )
-    .populate("issueId", "title category severity status address")
-    .populate("correctedBy", "name email");
+  const feedback = await AITrainingFeedback.upsertByIssue({
+    issueId: issue._id || issue.id,
+    predictedCategory: issue.aiAnalysis?.predictedCategory || issue.category,
+    predictedSeverity: issue.aiAnalysis?.predictedSeverity || issue.severity,
+    correctedCategory,
+    correctedSeverity,
+    trainingNotes: trainingNotes || "",
+    confidenceOverride:
+      confidenceOverride === undefined || confidenceOverride === null || confidenceOverride === ""
+        ? null
+        : Number(confidenceOverride),
+    correctedBy: userIdOf(req.user),
+  });
 
-  issue.category = correctedCategory;
-  issue.severity = correctedSeverity;
-  issue.aiAnalysis = {
-    ...issue.aiAnalysis,
-    trainingFeedbackCount: 1,
-    manualReviewApplied: true,
-    lastTrainingUpdateAt: new Date(),
-  };
-  await issue.save();
+  await Issue.updateById(issue._id || issue.id, {
+    category: correctedCategory,
+    severity: correctedSeverity,
+    aiAnalysis: {
+      ...(issue.aiAnalysis || {}),
+      trainingFeedbackCount: 1,
+      manualReviewApplied: true,
+      lastTrainingUpdateAt: new Date().toISOString(),
+    },
+  });
   invalidatePrefix("admin:");
   invalidatePrefix("ai:");
 
@@ -548,11 +410,12 @@ const deleteResolvedIssue = asyncHandler(async (req, res) => {
     });
   }
 
+  const issueId = issue._id || issue.id;
   await Promise.all([
-    Assignment.deleteMany({ issueId: issue._id }),
-    Comment.deleteMany({ issueId: issue._id }),
-    AITrainingFeedback.deleteMany({ issueId: issue._id }),
-    Issue.deleteOne({ _id: issue._id }),
+    Assignment.deleteByIssue(issueId),
+    Comment.deleteByIssue(issueId),
+    AITrainingFeedback.deleteByIssue(issueId),
+    Issue.deleteById(issueId),
   ]);
 
   invalidatePrefix("admin:");
@@ -574,7 +437,7 @@ const createWorker = asyncHandler(async (req, res) => {
   }
 
   const { name, email, password, phone } = req.body;
-  const existingUser = await User.findOne({ email: email.toLowerCase() });
+  const existingUser = await User.findByEmail(email.toLowerCase());
 
   if (existingUser) {
     return res.status(StatusCodes.CONFLICT).json({

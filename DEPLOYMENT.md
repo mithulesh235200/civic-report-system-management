@@ -2,9 +2,19 @@
 
 ## Recommended Setup
 
-- Frontend: Vercel
-- Backend API: Render
-- Database: Render MongoDB or MongoDB Atlas
+- Frontend: Vercel (Root Directory = `frontend`)
+- Backend API: Render (Root Directory = `backend`)
+- Database: Supabase Postgres (see `backend/supabase/schema.sql`)
+
+## Supabase Setup (do this first)
+
+1. Open https://fkmocqvsvisrkfgqpcab.supabase.co -> SQL Editor.
+2. Run the full `backend/supabase/schema.sql` file (creates users, issues,
+   issue_supporters, assignments, comments, notifications, ai_training_feedback).
+3. Go to Project Settings -> API and copy:
+   - `Project URL` -> `SUPABASE_URL`
+   - `service_role` key -> `SUPABASE_SERVICE_ROLE_KEY` (backend, secret)
+   - `anon` / publishable key -> `SUPABASE_ANON_KEY` (fallback only)
 
 ## Vercel Frontend
 
@@ -18,13 +28,18 @@
 ## Render Backend
 
 1. Import the repository into Render.
-2. Use [render.yaml](C:\Users\mithu\OneDrive\Desktop\New%20folder%20(2)\render.yaml) or create a web service manually.
+2. Use [render.yaml](render.yaml) or create a web service manually.
 3. Set the root directory to `backend` if you are not using the blueprint.
 4. Confirm environment variables:
    - `CLIENT_URL`
-   - `MONGODB_URI`
+   - `SUPABASE_URL`
+   - `SUPABASE_SERVICE_ROLE_KEY`
+   - `SUPABASE_ANON_KEY`
    - `JWT_SECRET`
-   - `JWT_EXPIRES_IN`
+   - `JWT_REFRESH_SECRET`
+   - `ACCESS_TOKEN_EXPIRES_IN`
+   - `REFRESH_TOKEN_EXPIRES_IN`
+   - `COOKIE_SECURE`
    - `AI_PROVIDER`
    - `OPENAI_API_KEY`
    - `OPENAI_MODEL`
@@ -42,7 +57,7 @@
 
 ## Continuous Integration
 
-GitHub Actions CI is configured in [.github/workflows/ci.yml](C:\Users\mithu\OneDrive\Desktop\New%20folder%20(2)\.github\workflows\ci.yml).
+GitHub Actions CI is configured in [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
-- Backend job runs the automated Jest test suite.
+- Backend job runs the automated Jest test suite (uses in-memory store, no Supabase needed).
 - Frontend job performs a production build check.

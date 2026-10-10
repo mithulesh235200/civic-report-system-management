@@ -1,24 +1,26 @@
-const mongoose = require("mongoose");
+const { getSupabase, isSupabaseConfigured, isTestMode } = require("./supabase");
 
 const connectDB = async () => {
-  let mongoURI = process.env.MONGODB_URI;
-
-  if (!mongoURI) {
-    console.log("MONGODB_URI is not configured. Falling back to MongoDB Memory Server...");
-    try {
-      // Dynamically require to avoid loading it in production if not needed
-      const { MongoMemoryServer } = require("mongodb-memory-server");
-      const mongoServer = await MongoMemoryServer.create();
-      mongoURI = mongoServer.getUri();
-      console.log(`MongoDB Memory Server started at: ${mongoURI}`);
-    } catch (err) {
-      console.error("Failed to start MongoDB Memory Server:", err);
-      throw new Error("MONGODB_URI is not configured and MongoDB Memory Server failed to start");
-    }
+  if (isTestMode() && !isSupabaseConfigured()) {
+    console.log("Supabase is not configured. Running with in-memory test store.");
+    return;
   }
 
-  await mongoose.connect(mongoURI);
-  console.log("MongoDB connected");
+  const supabase = getSupabase();
+
+  if (!supabase) {
+    throw new Error(
+      "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or anon key) must be configured. See backend/.env.example."
+    );
+  }
+
+  const { error } = await supabase.from("users").select("id", { head: true, count: "exact" }).limit(1);
+
+  if (error) {
+    throw new Error(`Supabase connection failed: ${error.message}. Did you run backend/supabase/schema.sql?`);
+  }
+
+  console.log("Supabase (Postgres) connected");
 };
 
 module.exports = connectDB;

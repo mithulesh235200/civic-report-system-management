@@ -12,9 +12,11 @@ Show the full CivicTrack workflow across:
 
 ## Startup Order
 
-### 1. Start MongoDB
+### 1. Set Up Supabase
 
-Make sure your local MongoDB service is running before anything else.
+Run `backend/supabase/schema.sql` once in the Supabase SQL Editor at
+https://fkmocqvsvisrkfgqpcab.supabase.co, and set `SUPABASE_URL` +
+`SUPABASE_SERVICE_ROLE_KEY` in `backend/.env`.
 
 ### 2. Start Backend
 
@@ -25,7 +27,7 @@ node server.js
 
 Expected output:
 
-- `MongoDB connected`
+- `Supabase (Postgres) connected`
 - `Server running on port 5000`
 
 ### 3. Start Frontend
@@ -60,7 +62,8 @@ Minimum values:
 PORT=5000
 NODE_ENV=development
 CLIENT_URL=http://localhost:3000
-MONGODB_URI=mongodb://127.0.0.1:27017/civictrack
+SUPABASE_URL=https://fkmocqvsvisrkfgqpcab.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=paste-your-service-role-key
 JWT_SECRET=dev-super-secret-key
 JWT_REFRESH_SECRET=dev-refresh-secret-key
 COOKIE_SECURE=false

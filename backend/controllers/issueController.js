@@ -4,6 +4,7 @@ const { validationResult } = require("express-validator");
 const asyncHandler = require("../middleware/asyncHandler");
 const Issue = require("../models/Issue");
 const Comment = require("../models/Comment");
+const User = require("../models/User");
 const { analyzeIssue, findNearbyDuplicate, generateIssueDraft } = require("../services/aiService");
 const { invalidatePrefix } = require("../services/cacheService");
 const { createNotificationForUsers } = require("../services/notificationService");
@@ -44,15 +45,7 @@ const buildUserAiContext = (user) => ({
   name: user?.name || "",
 });
 
-const isGeoIndexReadinessError = (error) => {
-  const message = String(error?.message || "").toLowerCase();
-  return (
-    message.includes("unable to find index for $geo") ||
-    message.includes("unable to find index for geo") ||
-    message.includes("2dsphere index") ||
-    message.includes("$near")
-  );
-};
+const userIdOf = (user) => String(user?._id || user?.id);
 
 const analyzeDraft = asyncHandler(async (req, res) => {
   const { title, description, image, category, latitude, longitude } = req.body;
@@ -130,11 +123,9 @@ const createIssue = asyncHandler(async (req, res) => {
     category: analysis.predictedCategory || category,
     severity: analysis.predictedSeverity || "medium",
     address,
-    location: {
-      type: "Point",
-      coordinates: [Number(longitude), Number(latitude)],
-    },
-    reportedBy: req.user._id,
+    longitude: Number(longitude),
+    latitude: Number(latitude),
+    reportedBy: userIdOf(req.user),
     aiAnalysis: {
       predictedCategory: analysis.predictedCategory,
       predictedSeverity: analysis.predictedSeverity,
@@ -166,9 +157,7 @@ const createIssue = asyncHandler(async (req, res) => {
   invalidatePrefix("admin:");
   invalidatePrefix("ai:");
 
-  const populatedIssue = await Issue.findById(issue._id)
-    .populate("reportedBy", "name email role")
-    .lean();
+  const populatedIssue = await Issue.findByIdPopulated(issue._id || issue.id);
 
   const payload = {
     success: true,
@@ -182,10 +171,7 @@ const createIssue = asyncHandler(async (req, res) => {
 });
 
 const getMyIssues = asyncHandler(async (req, res) => {
-  const issues = await Issue.find({ reportedBy: req.user._id })
-    .populate("assignedWorker", "name email")
-    .sort({ createdAt: -1 })
-    .lean();
+  const issues = await Issue.listByReporter(userIdOf(req.user));
 
   res.status(StatusCodes.OK).json({
     success: true,
@@ -194,11 +180,7 @@ const getMyIssues = asyncHandler(async (req, res) => {
 });
 
 const getIssueById = asyncHandler(async (req, res) => {
-  const issue = await Issue.findById(req.params.id)
-    .populate("reportedBy", "name email role")
-    .populate("assignedWorker", "name email role")
-    .populate("supporters", "name email")
-    .lean();
+  const issue = await Issue.findByIdPopulated(req.params.id);
 
   if (!issue) {
     return res.status(StatusCodes.NOT_FOUND).json({
@@ -207,8 +189,11 @@ const getIssueById = asyncHandler(async (req, res) => {
     });
   }
 
-  const isOwner = String(issue.reportedBy._id) === String(req.user._id);
-  const isSupporter = issue.supporters.some((supporter) => String(supporter._id) === String(req.user._id));
+  const reporterId = String(issue.reportedBy?._id || issue.reportedBy?.id || issue.reportedBy);
+  const isOwner = reporterId === userIdOf(req.user);
+  const isSupporter = (issue.supporters || []).some(
+    (supporter) => String(supporter?._id || supporter?.id || supporter) === userIdOf(req.user)
+  );
   if (!isOwner && !isSupporter) {
     return res.status(StatusCodes.FORBIDDEN).json({
       success: false,
@@ -216,10 +201,7 @@ const getIssueById = asyncHandler(async (req, res) => {
     });
   }
 
-  const comments = await Comment.find({ issueId: issue._id })
-    .populate("userId", "name role")
-    .sort({ createdAt: 1 })
-    .lean();
+  const comments = await Comment.listByIssue(issue._id || issue.id);
 
   res.status(StatusCodes.OK).json({
     success: true,
@@ -229,9 +211,7 @@ const getIssueById = asyncHandler(async (req, res) => {
 });
 
 const joinIssue = asyncHandler(async (req, res) => {
-  const issue = await Issue.findById(req.params.id)
-    .populate("reportedBy", "name email")
-    .populate("supporters", "name email");
+  const issue = await Issue.findById(req.params.id);
 
   if (!issue) {
     return res.status(StatusCodes.NOT_FOUND).json({
@@ -240,14 +220,17 @@ const joinIssue = asyncHandler(async (req, res) => {
     });
   }
 
-  if (String(issue.reportedBy._id) === String(req.user._id)) {
+  const reporterId = String(issue.reportedBy?._id || issue.reportedBy?.id || issue.reportedBy);
+  if (reporterId === userIdOf(req.user)) {
     return res.status(StatusCodes.BAD_REQUEST).json({
       success: false,
       message: "You already reported this issue",
     });
   }
 
-  const alreadySupporting = issue.supporters.some((supporter) => String(supporter._id) === String(req.user._id));
+  const alreadySupporting = (issue.supporters || []).some(
+    (supporter) => String(supporter?._id || supporter?.id || supporter) === userIdOf(req.user)
+  );
   if (alreadySupporting) {
     return res.status(StatusCodes.BAD_REQUEST).json({
       success: false,
@@ -255,30 +238,25 @@ const joinIssue = asyncHandler(async (req, res) => {
     });
   }
 
-  issue.supporters.push(req.user._id);
-  await issue.save();
+  await Issue.addSupporter(issue._id || issue.id, userIdOf(req.user));
   invalidatePrefix("admin:");
 
   await createNotificationForUsers({
-    userIds: [issue.reportedBy._id],
+    userIds: [reporterId],
     message: `${req.user.name} also reported concern for issue "${issue.title}"`,
     type: "system",
   });
 
-  emitToUsers(req.app, [issue.reportedBy._id], "issue:joined", {
-    issueId: issue._id,
+  emitToUsers(req.app, [reporterId], "issue:joined", {
+    issueId: issue._id || issue.id,
     joinedBy: {
-      id: req.user._id,
+      id: userIdOf(req.user),
       name: req.user.name,
       email: req.user.email,
     },
   });
 
-  const updatedIssue = await Issue.findById(issue._id)
-    .populate("reportedBy", "name email role")
-    .populate("assignedWorker", "name email role")
-    .populate("supporters", "name email")
-    .lean();
+  const updatedIssue = await Issue.findByIdPopulated(issue._id || issue.id);
 
   res.status(StatusCodes.OK).json({
     success: true,
@@ -289,29 +267,8 @@ const joinIssue = asyncHandler(async (req, res) => {
 
 const getMapIssues = asyncHandler(async (req, res) => {
   const { category, severity, status } = req.query;
-  const query = {
-    status: { $ne: ISSUE_STATUS.REJECTED },
-  };
 
-  if (category) {
-    query.category = category;
-  }
-
-  if (severity) {
-    query.severity = severity;
-  }
-
-  if (status && status !== "all") {
-    query.status = status;
-  }
-
-  const issues = await Issue.find(
-    query,
-    "title category severity status location address createdAt"
-  )
-    .sort({ createdAt: -1 })
-    .limit(500)
-    .lean();
+  const issues = await Issue.listMap({ category, severity, status });
 
   res.status(StatusCodes.OK).json({
     success: true,
@@ -330,7 +287,8 @@ const addComment = asyncHandler(async (req, res) => {
     });
   }
 
-  if (String(issue.reportedBy) !== String(req.user._id)) {
+  const reporterId = String(issue.reportedBy?._id || issue.reportedBy?.id || issue.reportedBy);
+  if (reporterId !== userIdOf(req.user)) {
     return res.status(StatusCodes.FORBIDDEN).json({
       success: false,
       message: "You can only comment on your own issues from the citizen portal",
@@ -338,22 +296,28 @@ const addComment = asyncHandler(async (req, res) => {
   }
 
   const comment = await Comment.create({
-    issueId: issue._id,
-    userId: req.user._id,
+    issueId: issue._id || issue.id,
+    userId: userIdOf(req.user),
     message,
   });
   invalidatePrefix("admin:");
 
-  const populatedComment = await Comment.findById(comment._id).populate("userId", "name role").lean();
+  const commenter = await User.findById(userIdOf(req.user));
+  const populatedComment = {
+    ...comment,
+    userId: commenter
+      ? { _id: commenter.id, id: commenter.id, name: commenter.name, role: commenter.role }
+      : comment.userId,
+  };
 
   await createNotificationForUsers({
-    userIds: [req.user._id],
+    userIds: [userIdOf(req.user)],
     message: `Comment added to issue ${issue.title}`,
     type: "system",
   });
 
-  emitToUsers(req.app, [req.user._id], "issue:commented", {
-    issueId: issue._id,
+  emitToUsers(req.app, [userIdOf(req.user)], "issue:commented", {
+    issueId: issue._id || issue.id,
     comment: populatedComment,
   });
 
@@ -368,35 +332,12 @@ const getNearbyIssues = asyncHandler(async (req, res) => {
   const latitude = Number(req.query.latitude);
   const radiusInKm = Number(req.query.radiusInKm || 5);
 
-  try {
-    const issues = await Issue.find({
-      location: {
-        $near: {
-          $geometry: {
-            type: "Point",
-            coordinates: [longitude, latitude],
-          },
-          $maxDistance: radiusInKm * 1000,
-        },
-      },
-    })
-      .limit(100)
-      .lean();
+  const issues = await Issue.listNearby({ longitude, latitude, radiusKm: radiusInKm });
 
-    res.status(StatusCodes.OK).json({
-      success: true,
-      issues,
-    });
-  } catch (error) {
-    if (isGeoIndexReadinessError(error)) {
-      return res.status(StatusCodes.OK).json({
-        success: true,
-        issues: [],
-      });
-    }
-
-    throw error;
-  }
+  res.status(StatusCodes.OK).json({
+    success: true,
+    issues,
+  });
 });
 
 module.exports = {

@@ -29,10 +29,6 @@ const protect = asyncHandler(async (req, res, next) => {
       });
     }
 
-    if (typeof user.getPortalRole === "function") {
-      user.role = user.getPortalRole();
-    }
-
     req.user = user;
     next();
   } catch (error) {

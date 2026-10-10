@@ -24,7 +24,7 @@ const seedUsers = async () => {
   ];
 
   for (const userData of users) {
-    const existing = await User.findOne({ email: userData.email });
+    const existing = await User.findByEmail(userData.email);
     if (!existing) {
       await User.create(userData);
     }

@@ -1,7 +1,4 @@
-const mongoose = require("mongoose");
-const { MongoMemoryServer } = require("mongodb-memory-server");
-
-let mongoServer;
+const store = require("../models/_store");
 
 beforeAll(async () => {
   process.env.NODE_ENV = "test";
@@ -11,18 +8,12 @@ beforeAll(async () => {
   process.env.REFRESH_TOKEN_EXPIRES_IN = "1d";
   process.env.COOKIE_SECURE = "false";
   process.env.CLIENT_URL = "http://localhost:3000";
-
-  mongoServer = await MongoMemoryServer.create();
-  await mongoose.connect(mongoServer.getUri());
 });
 
-afterEach(async () => {
-  const collections = mongoose.connection.collections;
-  await Promise.all(Object.values(collections).map((collection) => collection.deleteMany({})));
+beforeEach(() => {
+  store.reset();
 });
 
 afterAll(async () => {
-  await mongoose.connection.dropDatabase();
-  await mongoose.connection.close();
-  await mongoServer.stop();
+  store.reset();
 });

@@ -17,8 +17,8 @@ CivicTrack is a production-oriented full-stack platform for reporting, managing,
 - File upload pipeline for issue images and proof-of-resolution images
 
 ### Data Layer
-- MongoDB with Mongoose models for users, issues, assignments, comments, and notifications
-- GeoJSON-based location storage with geospatial indexes for nearby issue lookup and heatmap support
+- Supabase Postgres with tables for users, issues, issue_supporters, assignments, comments, and notifications (`backend/supabase/schema.sql`)
+- Longitude/latitude columns with Haversine filtering in JS for nearby issue lookup and duplicate detection
 
 ### Security Model
 - JWT authentication for all protected APIs
@@ -29,7 +29,7 @@ CivicTrack is a production-oriented full-stack platform for reporting, managing,
 
 1. Citizen registers or logs in.
 2. Citizen submits an issue with image, description, category, and GPS coordinates.
-3. Backend enriches the issue through AI services and stores it in MongoDB.
+3. Backend enriches the issue through AI services and stores it in Supabase Postgres.
 4. Admin reviews the report, verifies it, and assigns it to a field worker.
 5. Field worker receives the assignment, navigates to the issue, uploads proof, and marks it resolved.
 6. Socket.io broadcasts status changes to subscribed clients and creates notifications.
@@ -154,12 +154,12 @@ CivicTrack/
 ## Run Locally
 
 ### Backend
-1. Copy `backend/.env.example` to `backend/.env`
-2. Install dependencies inside `backend`
-3. Start MongoDB
+1. Run `backend/supabase/schema.sql` once in the Supabase SQL Editor
+2. Copy `backend/.env.example` to `backend/.env` and set `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`
+3. Install dependencies inside `backend`
 4. Run `npm run dev`
 5. Optional: seed default admin and worker accounts with `npm run seed:users`
-6. Run automated tests with `npm test`
+6. Run automated tests with `npm test` (uses in-memory store, no Supabase needed)
 
 ### Frontend
 1. Copy `frontend/.env.example` to `frontend/.env.local`

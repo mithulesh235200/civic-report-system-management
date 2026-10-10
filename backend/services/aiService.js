@@ -572,32 +572,14 @@ const summarizeHistoricalPattern = (matches, predictedCategory, predictedSeverit
 
 const buildAdvancedLearningSignals = async ({ title, description, predictedCategory, predictedSeverity, duplicateScore = 0 }) => {
   const queryText = `${title || ""} ${description || ""}`;
-  const candidateQuery =
-    predictedCategory && predictedCategory !== "other"
-      ? {
-          category: predictedCategory,
-          status: { $in: ["verified", "assigned", "in-progress", "resolved"] },
-        }
-      : { status: { $in: ["verified", "assigned", "in-progress", "resolved"] } };
 
   const cacheSuffix = predictedCategory && predictedCategory !== "other" ? predictedCategory : "all";
   const [candidates, reviewedFeedback] = await Promise.all([
     getOrSet(`ai:memory:issues:${cacheSuffix}`, 45000, async () =>
-      Issue.find(candidateQuery)
-        .select("title description category severity status address aiAnalysis createdAt")
-        .sort({ createdAt: -1 })
-        .limit(40)
-        .lean()
+      Issue.candidatesForMemory({ category: predictedCategory, limit: 40 })
     ),
     getOrSet(`ai:memory:feedback:${cacheSuffix}`, 45000, async () =>
-      AITrainingFeedback.find({
-        status: "approved",
-        ...(predictedCategory && predictedCategory !== "other" ? { correctedCategory: predictedCategory } : {}),
-      })
-        .populate("issueId", "title description address status")
-        .sort({ appliedAt: -1 })
-        .limit(30)
-        .lean()
+      AITrainingFeedback.reviewedForCategory(predictedCategory, 30)
     ),
   ]);
 
@@ -1144,37 +1126,24 @@ const findNearbyDuplicate = async ({ category, longitude, latitude }) => {
   }
 
   try {
-    const nearbyIssue = await Issue.findOne({
+    const nearbyIssue = await Issue.findDuplicate({
       category,
-      status: { $ne: "rejected" },
-      location: {
-        $near: {
-          $geometry: {
-            type: "Point",
-            coordinates: [longitude, latitude],
-          },
-          $maxDistance: 250,
-        },
-      },
+      longitude,
+      latitude,
     });
 
     if (!nearbyIssue) {
       return null;
     }
 
-    const [duplicateLongitude, duplicateLatitude] = nearbyIssue.location.coordinates;
-
     return {
-      issueId: nearbyIssue._id,
+      issueId: nearbyIssue.issueId,
       title: nearbyIssue.title,
       address: nearbyIssue.address,
       status: nearbyIssue.status,
       severity: nearbyIssue.severity,
-      duplicateScore:
-        nearbyIssue.address && calculateDistanceMeters(longitude, latitude, duplicateLongitude, duplicateLatitude) <= 100
-          ? 0.9
-          : 0.82,
-      distanceMeters: calculateDistanceMeters(longitude, latitude, duplicateLongitude, duplicateLatitude),
+      duplicateScore: nearbyIssue.duplicateScore,
+      distanceMeters: nearbyIssue.distanceMeters,
     };
   } catch (error) {
     if (isGeoIndexReadinessError(error)) {

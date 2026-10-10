@@ -4,12 +4,12 @@ const asyncHandler = require("../middleware/asyncHandler");
 const Notification = require("../models/Notification");
 const { getOrSet, invalidatePrefix } = require("../services/cacheService");
 
+const userIdOf = (value) => String(value?._id || value?.id || value);
+
 const getMyNotifications = asyncHandler(async (req, res) => {
-  const notifications = await getOrSet(`notifications:${req.user._id}`, 15000, async () =>
-    Notification.find({ userId: req.user._id })
-      .sort({ createdAt: -1 })
-      .limit(100)
-      .lean()
+  const userId = userIdOf(req.user);
+  const notifications = await getOrSet(`notifications:${userId}`, 15000, async () =>
+    Notification.listByUser(userId, 100)
   );
 
   res.status(StatusCodes.OK).json({
@@ -19,7 +19,7 @@ const getMyNotifications = asyncHandler(async (req, res) => {
 });
 
 const markNotificationRead = asyncHandler(async (req, res) => {
-  const notification = await Notification.findOne({ _id: req.params.id, userId: req.user._id });
+  const notification = await Notification.markRead(req.params.id, userIdOf(req.user));
 
   if (!notification) {
     return res.status(StatusCodes.NOT_FOUND).json({
@@ -28,9 +28,7 @@ const markNotificationRead = asyncHandler(async (req, res) => {
     });
   }
 
-  notification.status = "read";
-  await notification.save();
-  invalidatePrefix(`notifications:${req.user._id}`);
+  invalidatePrefix(`notifications:${userIdOf(req.user)}`);
 
   res.status(StatusCodes.OK).json({
     success: true,

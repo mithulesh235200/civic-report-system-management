@@ -425,45 +425,55 @@ const requestOpenAIReply = async ({ user, message, history, context }) => {
 };
 
 const buildGeneralChatContext = async (user) => {
+  const userId = user._id || user.id;
   if (user.role === "admin") {
-    const [totalIssues, pendingIssues, recentIssues, criticalIssues, categoryBreakdown] = await Promise.all([
-      Issue.countDocuments(),
-      Issue.countDocuments({ status: { $in: ["reported", "verified", "assigned", "in-progress"] } }),
-      Issue.find().sort({ createdAt: -1 }).limit(5).select("title category status severity address createdAt").lean(),
-      Issue.countDocuments({ severity: "critical", status: { $ne: "resolved" } }),
-      Issue.aggregate([
-        { $group: { _id: "$category", count: { $sum: 1 } } },
-        { $sort: { count: -1 } },
-        { $limit: 4 },
-      ]),
-    ]);
+    const stats = await Issue.dashboardStats();
+    const recentRows = await Issue.listAdmin({});
+    const recentIssues = recentRows.slice(0, 5).map((issue) => ({
+      title: issue.title,
+      category: issue.category,
+      status: issue.status,
+      severity: issue.severity,
+      address: issue.address,
+      createdAt: issue.createdAt,
+    }));
+    const criticalIssues = (await Issue.listAdmin({})).filter(
+      (issue) => issue.severity === "critical" && issue.status !== "resolved"
+    ).length;
 
     return {
-      totalIssues,
-      pendingIssues,
+      totalIssues: stats.totalIssues,
+      pendingIssues: stats.pendingIssues,
       recentIssuesSummary: summarizeIssues(recentIssues),
       criticalIssues,
-      topCategories: categoryBreakdown.map((item) => `${item._id}: ${item.count}`),
+      topCategories: stats.categoryBreakdown.slice(0, 4).map((item) => `${item._id}: ${item.count}`),
     };
   }
 
-  const query = user.role === "worker" ? { assignedWorker: user._id || user.id } : { reportedBy: user._id || user.id };
-  const [issues, activeCount, totalIssues, criticalCount] = await Promise.all([
-    Issue.find(query).sort({ createdAt: -1 }).limit(5).select("title category status severity address createdAt").lean(),
-    Issue.countDocuments({
-      ...query,
-      status: { $in: ["reported", "verified", "assigned", "in-progress"] },
-    }),
-    Issue.countDocuments(query),
-    Issue.countDocuments({ ...query, severity: "critical", status: { $ne: "resolved" } }),
-  ]);
+  const myIssues = user.role === "worker" ? await Issue.listAdmin({}) : await Issue.listByReporter(userId);
+  const scoped =
+    user.role === "worker"
+      ? myIssues.filter((issue) => String(issue.assignedWorker?._id || issue.assignedWorker) === String(userId))
+      : myIssues;
+  const activeStatuses = new Set(["reported", "verified", "assigned", "in-progress"]);
+  const active = scoped.filter((issue) => activeStatuses.has(issue.status));
+  const critical = scoped.filter((issue) => issue.severity === "critical" && issue.status !== "resolved");
 
   return {
-    totalIssues,
-    assignedCount: user.role === "worker" ? activeCount : undefined,
-    activeCount,
-    criticalCount,
-    recentIssuesSummary: summarizeIssues(issues),
+    totalIssues: scoped.length,
+    assignedCount: user.role === "worker" ? active.length : undefined,
+    activeCount: active.length,
+    criticalCount: critical.length,
+    recentIssuesSummary: summarizeIssues(
+      scoped.slice(0, 5).map((issue) => ({
+        title: issue.title,
+        category: issue.category,
+        status: issue.status,
+        severity: issue.severity,
+        address: issue.address,
+        createdAt: issue.createdAt,
+      }))
+    ),
   };
 };
 
@@ -472,11 +482,7 @@ const buildIssueContext = async (user, issueId) => {
     return null;
   }
 
-  const issue = await Issue.findById(issueId)
-    .populate("reportedBy", "name email role")
-    .populate("assignedWorker", "name email role")
-    .populate("supporters", "name email")
-    .lean();
+  const issue = await Issue.findByIdPopulated(issueId);
 
   if (!canAccessIssue(user, issue)) {
     return null;

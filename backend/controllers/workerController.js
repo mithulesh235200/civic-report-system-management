@@ -12,6 +12,8 @@ const { uploadImage } = require("../services/imageService");
 const { buildWorkerBrief, verifyResolutionProof } = require("../services/aiService");
 const { ISSUE_STATUS } = require("../utils/constants");
 
+const userIdOf = (value) => String(value?._id || value?.id || value);
+
 const calculateDistanceMeters = (longitudeA, latitudeA, longitudeB, latitudeB) => {
   const toRadians = (degrees) => (degrees * Math.PI) / 180;
   const earthRadiusMeters = 6371000;
@@ -31,48 +33,44 @@ const getWorkerTasks = asyncHandler(async (req, res) => {
   const currentLatitude = req.query.latitude ? Number(req.query.latitude) : null;
   const currentLongitude = req.query.longitude ? Number(req.query.longitude) : null;
 
-  const assignments = await Assignment.find({ workerId: req.user._id })
-    .populate({
-      path: "issueId",
-      populate: {
-        path: "reportedBy",
-        select: "name email",
-      },
-    })
-    .sort({ createdAt: -1 })
-    .lean();
+  const assignments = await Assignment.listByWorker(userIdOf(req.user));
 
-  const tasks = assignments
-    .filter((assignment) => assignment.issueId)
-    .map((assignment) => {
-      const issue = assignment.issueId;
-      const coordinates = issue.location?.coordinates || [];
-      const hasLocation = coordinates.length === 2;
-      const distanceMeters =
-        hasLocation && currentLatitude !== null && currentLongitude !== null
-          ? calculateDistanceMeters(currentLongitude, currentLatitude, coordinates[0], coordinates[1])
-          : null;
+  const tasks = [];
+  for (const assignment of assignments) {
+    const issue = await Issue.findByIdPopulated(assignment.issueId);
+    if (!issue) {
+      continue;
+    }
+    const reporter = issue.reportedBy;
+    const coordinates = issue.location?.coordinates || [];
+    const hasLocation = coordinates.length === 2;
+    const distanceMeters =
+      hasLocation && currentLatitude !== null && currentLongitude !== null
+        ? calculateDistanceMeters(currentLongitude, currentLatitude, coordinates[0], coordinates[1])
+        : null;
 
-      return {
-        ...assignment,
-        distanceMeters,
-        aiBrief:
-          issue.aiAnalysis?.workerBrief ||
-          buildWorkerBrief(issue.category, issue.severity),
-      };
-    })
-    .sort((left, right) => {
-      if (left.distanceMeters === null && right.distanceMeters === null) {
-        return new Date(right.createdAt) - new Date(left.createdAt);
-      }
-      if (left.distanceMeters === null) {
-        return 1;
-      }
-      if (right.distanceMeters === null) {
-        return -1;
-      }
-      return left.distanceMeters - right.distanceMeters;
+    tasks.push({
+      ...assignment,
+      issueId: issue,
+      distanceMeters,
+      aiBrief:
+        issue.aiAnalysis?.workerBrief ||
+        buildWorkerBrief(issue.category, issue.severity),
     });
+  }
+
+  tasks.sort((left, right) => {
+    if (left.distanceMeters === null && right.distanceMeters === null) {
+      return new Date(right.createdAt) - new Date(left.createdAt);
+    }
+    if (left.distanceMeters === null) {
+      return 1;
+    }
+    if (right.distanceMeters === null) {
+      return -1;
+    }
+    return left.distanceMeters - right.distanceMeters;
+  });
 
   const stats = {
     totalTasks: tasks.length,
@@ -100,7 +98,7 @@ const completeTask = asyncHandler(async (req, res) => {
   const { issueId, proofImage, resolutionNotes } = req.body;
   const storedProofImage = await uploadImage(proofImage, "civictrack/resolutions");
 
-  const assignment = await Assignment.findOne({ issueId, workerId: req.user._id }).populate("issueId");
+  const assignment = await Assignment.findOne({ issueId, workerId: userIdOf(req.user) });
   if (!assignment) {
     return res.status(StatusCodes.NOT_FOUND).json({
       success: false,
@@ -116,13 +114,9 @@ const completeTask = asyncHandler(async (req, res) => {
     });
   }
 
-  assignment.status = "completed";
-  await assignment.save();
+  await Assignment.updateStatus(assignment._id || assignment.id, "completed");
 
-  issue.status = ISSUE_STATUS.RESOLVED;
-  issue.proofImage = storedProofImage;
-  issue.resolutionNotes = resolutionNotes;
-  issue.resolutionVerification = {
+  const verification = {
     ...(await verifyResolutionProof({
       issue: {
         title: issue.title,
@@ -134,50 +128,56 @@ const completeTask = asyncHandler(async (req, res) => {
         resolutionNotes,
       },
     })),
-    reviewedAt: new Date(),
+    reviewedAt: new Date().toISOString(),
   };
-  await issue.save();
+
+  const updatedIssue = await Issue.updateById(issue._id || issue.id, {
+    status: ISSUE_STATUS.RESOLVED,
+    proofImage: storedProofImage,
+    resolutionNotes,
+    resolutionVerification: verification,
+  });
   invalidatePrefix("admin:");
   invalidatePrefix("ai:");
 
-  const admins = await User.find({ role: "admin" }, "_id");
-  const adminIds = admins.map((admin) => admin._id);
-  const needsManualReview = issue.resolutionVerification?.verificationStatus !== "verified";
+  const adminIds = await User.listAdminIds();
+  const needsManualReview = verification?.verificationStatus !== "verified";
+  const reporterId = userIdOf(updatedIssue.reportedBy);
 
   await createNotificationForUsers({
-    userIds: [issue.reportedBy],
-    message: `Issue "${issue.title}" has been marked resolved by the field worker`,
+    userIds: [reporterId],
+    message: `Issue "${updatedIssue.title}" has been marked resolved by the field worker`,
     type: "issue-status",
   });
 
   if (needsManualReview) {
     await createNotificationForUsers({
       userIds: adminIds,
-      message: `Issue "${issue.title}" was resolved, but AI recommends manual proof review`,
+      message: `Issue "${updatedIssue.title}" was resolved, but AI recommends manual proof review`,
       type: "proof-review",
     });
   }
 
-  emitToUsers(req.app, [issue.reportedBy], "issue:resolved", {
-    issueId: issue._id,
-    status: issue.status,
+  emitToUsers(req.app, [reporterId], "issue:resolved", {
+    issueId: updatedIssue._id || updatedIssue.id,
+    status: updatedIssue.status,
     proofImage: storedProofImage,
     resolutionNotes,
-    resolutionVerification: issue.resolutionVerification,
+    resolutionVerification: verification,
   });
 
   if (needsManualReview) {
     emitToUsers(req.app, adminIds, "issue:proof-review-required", {
-      issueId: issue._id,
-      verificationStatus: issue.resolutionVerification?.verificationStatus,
-      confidenceScore: issue.resolutionVerification?.confidenceScore,
+      issueId: updatedIssue._id || updatedIssue.id,
+      verificationStatus: verification?.verificationStatus,
+      confidenceScore: verification?.confidenceScore,
     });
   }
 
   res.status(StatusCodes.OK).json({
     success: true,
     message: "Task marked as resolved",
-    issue,
+    issue: updatedIssue,
   });
 });
 
@@ -191,7 +191,7 @@ const updateWorkerPresence = asyncHandler(async (req, res) => {
   }
 
   const { availability, latitude, longitude } = req.body;
-  const worker = await User.findById(req.user._id);
+  const worker = await User.findById(userIdOf(req.user));
 
   if (!worker) {
     return res.status(StatusCodes.NOT_FOUND).json({
@@ -200,26 +200,25 @@ const updateWorkerPresence = asyncHandler(async (req, res) => {
     });
   }
 
+  const patch = {};
   if (availability) {
-    worker.workerProfile.availability = availability;
+    patch.workerAvailability = availability;
   }
 
   if (latitude !== undefined && longitude !== undefined) {
-    worker.workerProfile.lastKnownLocation = {
-      type: "Point",
-      coordinates: [Number(longitude), Number(latitude)],
-    };
-    worker.workerProfile.lastLocationUpdatedAt = new Date();
+    patch.workerLng = Number(longitude);
+    patch.workerLat = Number(latitude);
+    patch.workerLocationAt = new Date().toISOString();
   }
 
-  await worker.save();
+  const updated = await User.updateById(userIdOf(req.user), patch);
   invalidatePrefix("admin:workers");
   invalidatePrefix("admin:dashboard");
 
   res.status(StatusCodes.OK).json({
     success: true,
     message: "Worker presence updated",
-    worker: worker.toSafeObject(),
+    worker: updated.toSafeObject(),
   });
 });
 
