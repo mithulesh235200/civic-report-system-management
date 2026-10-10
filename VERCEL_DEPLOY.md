@@ -8,7 +8,7 @@
 ## What was fixed for Vercel
 1. `frontend/vercel.json` — explicit Next.js build/install commands.
 2. `frontend/package.json` — added `engines: node >=20 <25` so Vercel uses Node 20+.
-3. `frontend/Dockerfile` — fixed copy path (`next-cache`, not `.next`, because `next.config.js` sets `distDir: "next-cache"`).
+3. `frontend/next.config.js` — uses default `.next` output directory (Vercel requires it; custom `distDir` caused "output directory not found").
 4. `.vercelignore` (repo root) — excludes backend/mobile/node_modules/caches to keep Vercel uploads fast.
 
 ## IMPORTANT: Database is now Supabase Postgres
